@@ -1,0 +1,1201 @@
+Subject: [PATCH] COMP3301 2024 A3 Base Code Patch
+
+---
+ etc/MAKEDEV.common                  |   2 +
+ etc/etc.amd64/MAKEDEV               |   5 +
+ etc/etc.amd64/MAKEDEV.md            |   1 +
+ share/man/man8/man8.amd64/MAKEDEV.8 |   4 +
+ sys/arch/amd64/amd64/conf.c         |   7 +-
+ sys/arch/amd64/conf/files.amd64     |   1 +
+ sys/conf/GENERIC                    |   1 +
+ sys/conf/files                      |   2 +
+ sys/dev/vhd.c                       | 584 ++++++++++++++++++++++++++++
+ sys/dev/vhdvar.h                    |  76 ++++
+ sys/sys/conf.h                      |   3 +
+ usr.sbin/vhdctl/Makefile            |  10 +
+ usr.sbin/vhdctl/vhdctl.c            | 321 +++++++++++++++
+ 13 files changed, 1014 insertions(+), 3 deletions(-)
+ create mode 100644 sys/dev/vhd.c
+ create mode 100644 sys/dev/vhdvar.h
+ create mode 100644 usr.sbin/vhdctl/Makefile
+ create mode 100644 usr.sbin/vhdctl/vhdctl.c
+
+diff --git a/etc/MAKEDEV.common b/etc/MAKEDEV.common
+index 1e7bb3d23..f84b5158a 100644
+--- a/etc/MAKEDEV.common
++++ b/etc/MAKEDEV.common
+@@ -254,7 +254,9 @@ _mkdev(flo, fd*,
+ 	M r${nam}i	c $chr Add($n, 8) 640 operator-}, 664)dnl
+ __devitem(wd, {-wd*-}, {-quote(winchester)disk drives (ST506{-,-} IDE{-,-} ESDI{-,-} RLL{-,-} ...)-})dnl
+ __devitem(vnd, vnd*, quote(file)pseudo-disk devices)dnl
++__devitem(vhd, vhd*, quote(file)pseudo-disk devices)dnl
+ _mkdev(vnd, vnd*, {-dodisk vnd $U major_vnd_b major_vnd_c $U 0{--}ifstep(vnd)-})dnl
++_mkdev(vhd, vhd*, {-dodisk vhd $U major_vhd_b major_vhd_c $U 0{--}ifstep(vhd)-})dnl
+ dnl
+ dnl For normal disk devices, add a disk_q entry; anything else define like
+ dnl the rest (such as vnd above).
+diff --git a/etc/etc.amd64/MAKEDEV b/etc/etc.amd64/MAKEDEV
+index 621e56f1e..ca80d766c 100644
+--- a/etc/etc.amd64/MAKEDEV
++++ b/etc/etc.amd64/MAKEDEV
+@@ -35,6 +35,7 @@
+ #	rd*	"rd" pseudo-disks
+ #	sd*	SCSI disks, including flopticals
+ #	vnd*	"file" pseudo-disk devices
++#	vhd*	"file" pseudo-disk devices
+ #	wd*	"winchester" disk drives (ST506, IDE, ESDI, RLL, ...)
+ # Tapes:
+ #	ch*	SCSI media changers
+@@ -552,6 +553,10 @@ ch*)
+ 	M ch$U c 17 $U 660 operator
+ 	;;
+ 
++vhd*)
++	dodisk vhd $U 11 11 $U 0
++	;;
++
+ vnd*)
+ 	dodisk vnd $U 14 41 $U 0
+ 	;;
+diff --git a/etc/etc.amd64/MAKEDEV.md b/etc/etc.amd64/MAKEDEV.md
+index ccc5a3c37..036a3d7b1 100644
+--- a/etc/etc.amd64/MAKEDEV.md
++++ b/etc/etc.amd64/MAKEDEV.md
+@@ -32,6 +32,7 @@ _DEV(flo, 9, 2)
+ _DEV(rd, 47, 17)
+ _DEV(sd, 13, 4)
+ _DEV(vnd, 41, 14)
++_DEV(vhd, 11, 11)
+ _DEV(wd, 3, 0)
+ _TITLE(tap)
+ _DEV(ch, 17)
+diff --git a/share/man/man8/man8.amd64/MAKEDEV.8 b/share/man/man8/man8.amd64/MAKEDEV.8
+index 53c8cc9b5..352ce2313 100644
+--- a/share/man/man8/man8.amd64/MAKEDEV.8
++++ b/share/man/man8/man8.amd64/MAKEDEV.8
+@@ -92,6 +92,10 @@ SCSI disks, including flopticals, see
+ .Dq file
+ pseudo-disk devices, see
+ .Xr vnd 4 .
++.It Ar vhd*
++.Dq file
++pseudo-disk devices, see
++.Xr vhd 4 .
+ .It Ar wd*
+ .Dq winchester
+ disk drives (ST506, IDE, ESDI, RLL, ...), see
+diff --git a/sys/arch/amd64/amd64/conf.c b/sys/arch/amd64/amd64/conf.c
+index f87df4218..abd7f7a6c 100644
+--- a/sys/arch/amd64/amd64/conf.c
++++ b/sys/arch/amd64/amd64/conf.c
+@@ -48,6 +48,7 @@ bdev_decl(fd);
+ #include "cd.h"
+ #include "uk.h"
+ #include "vnd.h"
++#include "vhd.h"
+ #include "rd.h"
+ 
+ struct bdevsw	bdevsw[] =
+@@ -63,7 +64,7 @@ struct bdevsw	bdevsw[] =
+ 	bdev_notdef(),			/* 8 */
+ 	bdev_notdef(),			/* 9 */
+ 	bdev_notdef(),			/* 10 */
+-	bdev_notdef(),			/* 11 */
++	bdev_disk_init(NVHD,vhd),	/* 11: VHD disk driver */
+ 	bdev_notdef(),			/* 12 */
+ 	bdev_notdef(),			/* 13 */
+ 	bdev_disk_init(NVND,vnd),	/* 14: vnode disk driver */
+@@ -188,7 +189,7 @@ struct cdevsw	cdevsw[] =
+ 	cdev_tty_init(NCOM,com),	/* 8: serial port */
+ 	cdev_disk_init(NFD,fd),		/* 9: floppy disk */
+ 	cdev_vmm_init(NVMM,vmm),	/* 10 vmm */
+-	cdev_notdef(),			/* 11: Sony CD-ROM */
++	cdev_disk_init(NVHD,vhd),	/* 11: VHD disk driver */
+ 	cdev_wsdisplay_init(NWSDISPLAY,	/* 12: frame buffers, etc. */
+ 	    wsdisplay),
+ 	cdev_disk_init(NSD,sd),		/* 13: SCSI disk */
+@@ -345,7 +346,7 @@ const int chrtoblktbl[] = {
+ 	/*  8 */	NODEV,
+ 	/*  9 */	2,		/* fd */
+ 	/* 10 */	NODEV,
+-	/* 11 */	NODEV,
++	/* 11 */	11,		/* vhd */
+ 	/* 12 */	NODEV,
+ 	/* 13 */	4,		/* sd */
+ 	/* 14 */	NODEV,
+diff --git a/sys/arch/amd64/conf/files.amd64 b/sys/arch/amd64/conf/files.amd64
+index a3452d972..87910c80a 100644
+--- a/sys/arch/amd64/conf/files.amd64
++++ b/sys/arch/amd64/conf/files.amd64
+@@ -278,6 +278,7 @@ attach	ipmi at mainbus
+ # device major numbers
+ #
+ 
++major	{vhd = 11}
+ major	{vnd = 14}
+ major	{sd = 4}
+ major	{st = 5}
+diff --git a/sys/conf/GENERIC b/sys/conf/GENERIC
+index ac7ab88e7..a513ddac8 100644
+--- a/sys/conf/GENERIC
++++ b/sys/conf/GENERIC
+@@ -80,6 +80,7 @@ pseudo-device	nmea	1	# NMEA 0183 line discipline
+ pseudo-device	msts	1	# MSTS line discipline
+ pseudo-device	endrun	1	# EndRun line discipline
+ pseudo-device	vnd	4	# vnode disk devices
++pseudo-device	vhd	1	# VHD disk devices
+ pseudo-device	ksyms	1	# kernel symbols device
+ pseudo-device	kstat		# kernel statistics device
+ 
+diff --git a/sys/conf/files b/sys/conf/files
+index fd76e9934..0437c5afa 100644
+--- a/sys/conf/files
++++ b/sys/conf/files
+@@ -556,6 +556,7 @@ file	dev/ic/ufshci.c			ufshci
+ 
+ # legitimate pseudo-devices
+ pseudo-device vnd: disk
++pseudo-device vhd: disk
+ pseudo-device rd: disk
+ file	dev/rd.c			rd needs-flag
+ 
+@@ -679,6 +680,7 @@ file dev/ic/tea5757.c			tea5757
+ file dev/midi.c				midi | midibus		needs-flag
+ file dev/mulaw.c			audio			needs-flag
+ file dev/vnd.c				vnd			needs-flag
++file dev/vhd.c				vhd			needs-flag
+ file dev/rnd.c
+ file dev/video.c			video			needs-flag
+ file isofs/cd9660/cd9660_bmap.c		cd9660
+diff --git a/sys/dev/vhd.c b/sys/dev/vhd.c
+new file mode 100644
+index 000000000..fd3c37e2a
+--- /dev/null
++++ b/sys/dev/vhd.c
+@@ -0,0 +1,584 @@
++/*
++ * Copyright (c) 2024 The University of Queensland
++ *
++ * Permission to use, copy, modify, and distribute this software for any
++ * purpose with or without fee is hereby granted, provided that the above
++ * copyright notice and this permission notice appear in all copies.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
++ * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
++ * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
++ * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
++ * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
++ * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
++ * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
++ */
++
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <sys/namei.h>
++#include <sys/proc.h>
++#include <sys/errno.h>
++#include <sys/limits.h>
++#include <sys/buf.h>
++#include <sys/malloc.h>
++#include <sys/ioctl.h>
++#include <sys/disklabel.h>
++#include <sys/device.h>
++#include <sys/disk.h>
++#include <sys/stat.h>
++#include <sys/vnode.h>
++#include <sys/fcntl.h>
++#include <sys/uio.h>
++#include <sys/conf.h>
++#include <sys/dkio.h>
++#include <sys/specdev.h>
++#include <sys/tree.h>
++
++#include <dev/vhdvar.h>
++
++#define VHD_NLEN	(VHD_BACKING_FILE_SIZE + 1) /* add nul */
++
++struct vhd_softc {
++	struct device		 sc_dev;
++	RBT_ENTRY(vhd_softc)	 sc_entry;
++	struct refcnt		 sc_refs;
++
++	struct disk		 sc_dk;
++
++	char			*sc_fname;
++	size_t			 sc_fnamelen;
++	struct vnode		*sc_vp;
++	struct ucred		*sc_ucred;
++	int			 sc_rw;
++
++	u_int32_t		sc_cylinders;
++	u_int32_t		sc_heads;
++	u_int32_t		sc_secpertrack;
++};
++
++RBT_HEAD(vhd_softcs, vhd_softc);
++
++static inline int
++vhd_cmp(const struct vhd_softc *a, const struct vhd_softc *b)
++{
++	const struct device *da = &a->sc_dev;
++	const struct device *db = &b->sc_dev;
++
++	if (da->dv_unit > db->dv_unit)
++		return (1);
++	if (da->dv_unit < db->dv_unit)
++		return (-1);
++	return (0);
++}
++
++RBT_PROTOTYPE(vhd_softcs, vhd_softc, sc_entry, vhd_cmp);
++
++struct vhd_driver {
++	struct vhd_softcs		vd_scs;
++	struct rwlock			vd_lock;
++};
++
++static struct vhd_driver vd = {
++	.vd_scs		= RBT_INITIALIZER(),
++	.vd_lock	= RWLOCK_INITIALIZER("vhddrv")
++};
++
++static int	vhd_getdisklabel(dev_t, struct vhd_softc *,
++		    struct disklabel *, int);
++
++void
++vhdattach(int num)
++{
++	/* vd is already set up */
++}
++
++static struct vhd_softc *
++vhd_find(dev_t dev)
++{
++	struct device key = {
++		.dv_unit = DISKUNIT(dev)
++	};
++
++	return (RBT_FIND(vhd_softcs, &vd.vd_scs,
++	    (const struct vhd_softc *)&key));
++}
++
++static struct vhd_softc *
++vhd_create(dev_t dev)
++{
++	int unit = DISKUNIT(dev);
++	struct vhd_softc *sc;
++	struct device *dv;
++
++	sc = malloc(sizeof(*sc), M_DEVBUF, M_WAITOK|M_CANFAIL|M_ZERO);
++	if (sc == NULL)
++		return (NULL);
++
++	refcnt_init(&sc->sc_refs);
++
++	dv = &sc->sc_dev;
++	dv->dv_class = DV_DISK;
++	dv->dv_unit = unit;
++	if (snprintf(dv->dv_xname, sizeof(dv->dv_xname),
++	    "vhd%d", dv->dv_unit) >= sizeof(dv->dv_xname))
++		panic("%s dv_xname printf", __func__);
++	dv->dv_ref = 1;
++
++	sc->sc_dk.dk_name = dv->dv_xname;
++
++	return (sc); /* give ref to the caller */
++}
++
++static int
++vhd_insert(struct vhd_softc *sc)
++{
++	if (RBT_INSERT(vhd_softcs, &vd.vd_scs, sc) != NULL)
++		return (EBUSY);
++
++	refcnt_take(&sc->sc_refs); /* take one for the tree */
++	return (0);
++}
++
++static void
++vhd_remove(struct vhd_softc *sc)
++{
++	RBT_REMOVE(vhd_softcs, &vd.vd_scs, sc);
++	refcnt_rele(&sc->sc_refs); /* caller must be holding a ref too */
++}
++
++static struct vhd_softc *
++vhd_enter(dev_t dev)
++{
++	struct vhd_softc *sc;
++
++	rw_enter_read(&vd.vd_lock);
++	sc = vhd_find(dev);
++	if (sc != NULL)
++		refcnt_take(&sc->sc_refs);
++	rw_exit_read(&vd.vd_lock);
++
++	return (sc);
++}
++
++static void
++vhd_leave(struct vhd_softc *sc)
++{
++	if (refcnt_rele(&sc->sc_refs)) {
++		KASSERT(sc->sc_dev.dv_ref == 1);
++
++		vn_close(sc->sc_vp, sc->sc_rw, sc->sc_ucred, curproc);
++		crfree(sc->sc_ucred);
++
++		free(sc->sc_fname, M_DEVBUF, sc->sc_fnamelen);
++		free(sc, M_DEVBUF, sizeof(*sc));
++	}
++}
++
++static int
++vhd_disk_open(struct vhd_softc *sc, int part, int mode)
++{
++	int error;
++
++	error = disk_lock(&sc->sc_dk);
++	if (error != 0)
++		return (0);
++
++	error = disk_openpart(&sc->sc_dk, part, mode, 1);
++	disk_unlock(&sc->sc_dk);
++
++	return (error);
++}
++
++int
++vhdopen(dev_t dev, int flags, int fmt, struct proc *p)
++{
++	dev_t part = DISKPART(dev);
++	struct vhd_softc *sc;
++	int raw = part == RAW_PART && fmt == S_IFCHR;
++	int error;
++
++	sc = vhd_enter(dev);
++	if (sc == NULL) {
++		/* allow opens of /dev/rvhdXc for attach ioctls */
++		if (raw)
++			return (0);
++
++		return (ENXIO);
++	}
++
++	if (ISSET(flags, FWRITE) && !ISSET(sc->sc_rw, FWRITE) && !raw) {
++		error = EACCES;
++		goto leave;
++	}
++
++	if (sc->sc_dk.dk_openmask == 0) {
++		error = vhd_getdisklabel(dev, sc, sc->sc_dk.dk_label, 0);
++		if (error == EIO || error == ENXIO)
++			goto leave;
++	}
++
++	error = vhd_disk_open(sc, part, fmt);
++
++leave:
++	vhd_leave(sc);
++
++	return (error);
++}
++
++int
++vhdclose(dev_t dev, int flags, int fmt, struct proc *p)
++{
++	dev_t part = DISKPART(dev);
++	struct vhd_softc *sc;
++
++	sc = vhd_enter(dev);
++	if (sc == NULL) {
++		return (0);
++	}
++
++	disk_lock_nointr(&sc->sc_dk);
++	disk_closepart(&sc->sc_dk, part, fmt);
++	disk_unlock(&sc->sc_dk);
++	vhd_leave(sc);
++
++	return (0);
++}
++
++void
++vhdstrategy(struct buf *bp)
++{
++	struct vhd_softc *sc;
++	int s;
++
++	sc = vhd_enter(bp->b_dev);
++	if (sc == NULL) {
++		bp->b_error = ENXIO;
++		goto bad;
++	}
++	vhd_leave(sc);
++
++	/* XXX do actual vhd IO here */
++	bp->b_error = EIO;
++bad:
++	bp->b_flags |= B_ERROR;
++	bp->b_resid = bp->b_bcount;
++// done:
++	s = splbio();
++	biodone(bp);
++	splx(s);
++}
++
++int
++vhdread(dev_t dev, struct uio *uio, int flags)
++{
++	return (physio(vhdstrategy, dev, B_READ, minphys, uio));
++}
++
++int
++vhdwrite(dev_t dev, struct uio *uio, int flags)
++{
++	return (physio(vhdstrategy, dev, B_WRITE, minphys, uio));
++}
++
++static int
++vhd_attach(dev_t dev, int flag, const struct vhd_attach *vh, struct proc *p)
++{
++	struct vhd_softc *sc;
++	int part = DISKPART(dev);
++	struct vnode *vp;
++	char fname[PATH_MAX];
++	size_t fnamelen;
++	struct nameidata nd;
++	int rw;
++	int error;
++
++	/*
++	 * we can't be here without this being true, but it's
++	 * nice to be sure.
++	 */
++	if (part != RAW_PART || !vfinddev(dev, VCHR, &vp))
++		return (ENOTTY);
++	if (!ISSET(flag, FWRITE))
++		return (EBADF);
++
++	error = rw_enter(&vd.vd_lock, RW_WRITE|RW_INTR);
++	if (error != 0)
++		return (error);
++
++	sc = vhd_find(dev);
++	rw_exit(&vd.vd_lock);
++	if (sc != NULL)
++		return (EBUSY);
++
++	error = copyinstr(vh->vh_file, fname, sizeof(fname), &fnamelen);
++	if (error != 0)
++		return (error);
++
++	NDINIT(&nd, 0, 0, UIO_SYSSPACE, fname, p);
++	nd.ni_unveil = UNVEIL_READ;
++	rw = FREAD;
++	if (!vh->vh_readonly) {
++		nd.ni_unveil |= UNVEIL_WRITE;
++		rw |= FWRITE;
++	}
++	error = vn_open(&nd, rw, 0);
++	if (error != 0)
++		return (error);
++
++	vp = nd.ni_vp;
++	VOP_UNLOCK(vp);
++	if (vp->v_type != VREG) {
++		error = EOPNOTSUPP;
++		goto close;
++	}
++
++	sc = vhd_create(dev);
++	if (sc == NULL) {
++		error = ENOMEM;
++		goto close;
++	}
++
++	sc->sc_fname = malloc(fnamelen, M_DEVBUF, M_WAITOK|M_CANFAIL);
++	if (sc->sc_fname == NULL) {
++		error = ENOMEM;
++		goto destroy;
++	}
++
++	memcpy(sc->sc_fname, fname, fnamelen);
++	sc->sc_fnamelen = fnamelen;
++	sc->sc_vp = vp;
++	sc->sc_ucred = crhold(p->p_ucred);
++	sc->sc_rw = rw;
++
++	/*
++	 * <YOUR CODE HERE>
++	 *
++	 * remember to set sc_cylinders, sc_heads and sc_secpertrack in the
++	 * softc struct.
++	 */
++
++	error = rw_enter(&vd.vd_lock, RW_WRITE|RW_INTR);
++	if (error != 0)
++		goto freefname;
++
++	error = vhd_insert(sc);
++	if (error != 0)
++		goto rollback;
++
++	disk_attach(&sc->sc_dev, &sc->sc_dk);
++
++	rw_exit(&vd.vd_lock);
++
++	return (error);
++
++rollback:
++	rw_exit(&vd.vd_lock);
++freefname:
++	free(sc->sc_fname, M_DEVBUF, sc->sc_fnamelen);
++destroy:
++	free(sc, M_DEVBUF, sizeof(*sc));
++close:
++	vn_close(vp, rw, p->p_ucred, p);
++	return (error);
++}
++
++static int
++vhd_detach(struct vhd_softc *sc, dev_t dev, int flag, unsigned int force)
++{
++	struct vnode *vp;
++	int part = DISKPART(dev);
++	int error;
++
++	if (part != RAW_PART || !vfinddev(dev, VCHR, &vp))
++		return (ENOTTY);
++	if (!ISSET(flag, FWRITE))
++		return (EBADF);
++
++	error = rw_enter(&vd.vd_lock, RW_WRITE|RW_INTR);
++	if (error != 0)
++		return (error);
++
++	if (!force) {
++		struct disk *dk = &sc->sc_dk;
++		int pmask = (1 << part);
++
++		error = disk_lock(dk);
++		if (error != 0)
++			goto leave;
++
++		if (ISSET(dk->dk_copenmask, ~pmask) || dk->dk_bopenmask)
++			error = EBUSY;
++
++		disk_unlock(&sc->sc_dk);
++
++		if (error != 0)
++			goto leave;
++	}
++
++	vhd_remove(sc);
++	rw_exit(&vd.vd_lock);
++
++	disk_gone(vhdopen, sc->sc_dev.dv_unit);
++	disk_detach(&sc->sc_dk);
++
++	return (0);
++
++leave:
++	rw_exit(&vd.vd_lock);
++	return (error);
++}
++
++int
++vhdioctl(dev_t dev, u_long cmd, caddr_t data, int flag, struct proc *p)
++{
++	struct vhd_softc *sc;
++	struct disklabel *lp;
++	int error = 0;
++
++	if (cmd == VHDIOCATTACH)
++		return (vhd_attach(dev, flag, (struct vhd_attach *)data, p));
++
++	/* everything else needs an attached disk */
++	sc = vhd_enter(dev);
++	if (sc == NULL)
++		return (ENXIO);
++
++	switch (cmd) {
++	case VHDIOCDETACH:
++		error = vhd_detach(sc, dev, flag, *(unsigned int *)data);
++		break;
++
++	case DIOCRLDINFO:
++		lp = malloc(sizeof(*lp), M_TEMP, M_WAITOK);
++		vhd_getdisklabel(dev, sc, lp, 0);
++		*(sc->sc_dk.dk_label) = *lp;
++		free(lp, M_TEMP, sizeof(*lp));
++		break;
++
++	case DIOCGPDINFO:
++		vhd_getdisklabel(dev, sc, (struct disklabel *)data, 1);
++		break;
++
++	case DIOCGDINFO:
++		*(struct disklabel *)data = *(sc->sc_dk.dk_label);
++		break;
++
++	case DIOCGPART:
++		((struct partinfo *)data)->disklab = sc->sc_dk.dk_label;
++		((struct partinfo *)data)->part =
++		    &sc->sc_dk.dk_label->d_partitions[DISKPART(dev)];
++		break;
++
++	case DIOCWDINFO:
++	case DIOCSDINFO:
++		if (!ISSET(flag, FWRITE)) {
++			error = EBADF;
++			break;
++		}
++
++		error = disk_lock(&sc->sc_dk);
++		if (error != 0)
++			break;
++
++		error = setdisklabel(sc->sc_dk.dk_label,
++		    (struct disklabel *)data, sc->sc_dk.dk_openmask);
++		if (error == 0) {
++			if (cmd == DIOCWDINFO)
++				error = writedisklabel(DISKLABELDEV(dev),
++				    vhdstrategy, sc->sc_dk.dk_label);
++		}
++
++		disk_unlock(&sc->sc_dk);
++		break;
++
++	default:
++		error = ENOTTY;
++		break;
++	}
++
++	vhd_leave(sc);
++
++	return (error);
++}
++
++daddr_t
++vhdsize(dev_t dev)
++{
++	/* we don't support swapping to vhd. */
++	return (-1);
++}
++
++int
++vhddump(dev_t dev, daddr_t blkno, caddr_t va, size_t size)
++{
++	/* we don't support dumping to vhd. */
++	return (ENXIO);
++}
++
++static int
++vhd_getdisklabel(dev_t dev, struct vhd_softc *sc, struct disklabel *lp,
++    int spoofonly)
++{
++	memset(lp, 0, sizeof(*lp));
++
++	/* disk geometry (i hate this stuff) */
++	/*
++	 *			^ This was not me, but I hate this stuff too.
++	 *
++	 * For this assignment, you can just completely ignore all this
++	 * stuff. Basically, a disk can have many heads, and each head
++	 * contains a number of tracks, and each track contains a number
++	 * of sectors. You can just treat the number of cylinders (C in CHS)
++	 * as the number of tracks per head, the number of heads (H in CHS) as
++	 * the number of heads per disk and the number of sectors (S in CHS)
++	 * as the number of sectors per track.
++	 *
++	 * So:
++	 * 	TPH (tracks per head) = C in CHS
++	 * 	HPD (heads per disk) = H in CHS
++	 * 	SPT (sectors per track) = T in CHS
++	 *
++	 * 	d_nsectors = SPT
++	 * 	d_ntracks = TPH
++	 * 	d_ncylinders = HPD
++	 * 	d_secpercyl = TPH * SPT
++	 * 	d_secperunit = SPT * TPH * HPD
++	 *
++	 * All of this setup is done for you already, you just need to set
++	 * .sc_secpertrack to S in CHS, .sc_cylinders to C in CHS and .sc_heads
++	 * to H in CHS in the softc and it'll work.
++	 */
++
++	/* # of bytes per sector (must be 512). */
++	lp->d_secsize = 512;
++
++	/* # of sectors per track (S in CHS). */
++	lp->d_nsectors = sc->sc_secpertrack;
++
++	/* # of tracks per head (C in CHS). */
++	lp->d_ntracks = sc->sc_cylinders;
++
++	/* # of heads per disk (H in CHS). */
++	lp->d_ncylinders = sc->sc_heads;
++
++	/* # of sectors per head. */
++	lp->d_secpercyl = lp->d_ntracks * lp->d_nsectors;
++
++	/* # of sectors per disk. */
++	lp->d_secperunit = lp->d_secpercyl * lp->d_ncylinders;
++	lp->d_secperunith = 0;
++
++	lp->d_type = DTYPE_VND;
++	strncpy(lp->d_typename, "VHD File", sizeof(lp->d_typename));
++	strncpy(lp->d_packname, "comp3301", sizeof(lp->d_packname));
++	lp->d_version = 1;
++
++	lp->d_magic = DISKMAGIC;
++	lp->d_magic2 = DISKMAGIC;
++	lp->d_checksum = dkcksum(lp);
++
++	return (readdisklabel(DISKLABELDEV(dev), vhdstrategy, lp, spoofonly));
++}
++
++RBT_GENERATE(vhd_softcs, vhd_softc, sc_entry, vhd_cmp);
+diff --git a/sys/dev/vhdvar.h b/sys/dev/vhdvar.h
+new file mode 100644
+index 000000000..1970524ef
+--- /dev/null
++++ b/sys/dev/vhdvar.h
+@@ -0,0 +1,76 @@
++/*
++ * Copyright (c) 2024 The University of Queensland
++ *
++ * Permission to use, copy, modify, and distribute this software for any
++ * purpose with or without fee is hereby granted, provided that the above
++ * copyright notice and this permission notice appear in all copies.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
++ * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
++ * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
++ * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
++ * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
++ * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
++ * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
++ */
++
++#ifndef _DEV_VHDVAR_H_
++#define _DEV_VHDVAR_H_
++
++/*
++ * VHD file format
++ */
++
++struct vhd_file_footer {
++	char			cookie[8];
++	uint32_t		features;
++#define VHD_FEATURE_NONE		0
++#define VHD_FEATURE_TEMP		1
++#define VHD_FEATURE_RESV		2
++	uint16_t		version_major;
++#define VHD_VERSION_MAJOR		1
++	uint16_t		version_minor;
++#define VHD_VERSION_MINOR		0
++	uint64_t		data_offset;
++	uint32_t		creation_time;
++	char			creator[4];
++	uint16_t		creator_version_major;
++	uint16_t		creator_version_minor;
++	uint32_t		creator_os;
++	uint64_t		original_size;
++	uint64_t		current_size;
++	uint16_t		geometry_chs_cylinders;
++#define VHD_MAX_CYLINDERS		65535
++	uint8_t			geometry_chs_heads;
++#define VHD_MAX_HEADS			16
++	uint8_t			geometry_chs_secpertrack;
++#define VHD_MAX_SPT			255
++	uint32_t		vhd_type;
++#define VHD_TYPE_FIXED			2
++#define VHD_TYPE_DYNAMIC		3
++#define VHD_TYPE_DIFFERENCING		4	/* no need to support */
++	uint32_t		checksum;
++	char			uuid[16];
++	uint8_t			has_state_save;
++	char			reserved[427];
++};
++
++/*
++ * ioctl interface
++ */
++
++struct vhd_attach {
++	char			*vh_file;
++	unsigned int		 vh_readonly;
++};
++
++struct vhd_fname {
++	char			 vh_name[1024];
++};
++
++#define VHDIOCATTACH		_IOW('V', 1, struct vhd_attach)
++#define VHDIOCDETACH		_IOW('V', 2, int)
++#define VHDIOCFNAME		_IOR('V', 3, struct vhd_fname)
++#define VHDIOCSTAT		_IOR('V', 4, struct stat)
++
++#endif /* _DEV_VHDVAR_H_H */
+diff --git a/sys/sys/conf.h b/sys/sys/conf.h
+index 798ded6ff..6df76bc9e 100644
+--- a/sys/sys/conf.h
++++ b/sys/sys/conf.h
+@@ -577,6 +577,9 @@ bdev_decl(sw);
+ bdev_decl(vnd);
+ cdev_decl(vnd);
+ 
++bdev_decl(vhd);
++cdev_decl(vhd);
++
+ cdev_decl(ch);
+ 
+ bdev_decl(sd);
+diff --git a/usr.sbin/vhdctl/Makefile b/usr.sbin/vhdctl/Makefile
+new file mode 100644
+index 000000000..b935be447
+--- /dev/null
++++ b/usr.sbin/vhdctl/Makefile
+@@ -0,0 +1,10 @@
++PROG=vhdctl
++SRCS=vhdctl.c
++MAN=
++
++DEBUG=-g
++WARNINGS=Yes
++
++CFLAGS+=-Wall -Werror
++
++.include <bsd.prog.mk>
+diff --git a/usr.sbin/vhdctl/vhdctl.c b/usr.sbin/vhdctl/vhdctl.c
+new file mode 100644
+index 000000000..33ae09d76
+--- /dev/null
++++ b/usr.sbin/vhdctl/vhdctl.c
+@@ -0,0 +1,321 @@
++/* */
++
++/*
++ * Copyright (c) 2024 The University of Queensland
++ *
++ * Permission to use, copy, modify, and distribute this software for any
++ * purpose with or without fee is hereby granted, provided that the above
++ * copyright notice and this permission notice appear in all copies.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
++ * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
++ * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
++ * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
++ * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
++ * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
++ * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
++ */
++
++#include <sys/ioctl.h>
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <fcntl.h>
++#include <unistd.h>
++#include <limits.h>
++#include <err.h>
++
++#include <dev/vhdvar.h>
++
++#ifndef nitems
++#define nitems(_a) ((sizeof((_a)) / sizeof((_a)[0])))
++#endif
++
++#define VHD_PREFIX	"vhd"
++#define VHD_PREFIXLEN	(sizeof(VHD_PREFIX) - 1)
++
++struct subcmd {
++	int (*cmd)(const struct subcmd *, int, char *[]);
++	const char *name;
++	const char *usage;
++};
++
++static int	vhd_attach(const struct subcmd *, int, char *[]);
++static int	vhd_detach(const struct subcmd *, int, char *[]);
++static int	vhd_image(const struct subcmd *, int, char *[]);
++static int	vhd_stat(const struct subcmd *, int, char *[]);
++
++static const struct subcmd subcmds[] = {
++	{ vhd_attach,	"attach",
++	    "[-Dr] vhdX image.vhd" },
++	{ vhd_detach,	"detach",
++	    "[-Df] vhdX" },
++	{ vhd_image,	"image",
++	    "[-D] vhdX" },
++	{ vhd_stat,	"stat",
++	    "[-D] vhdX" },
++};
++
++static const struct subcmd *
++		vhd_subcmd_lookup(const char *);
++
++__dead static void
++usage(void)
++{
++	extern char *__progname;
++	const struct subcmd *c = &subcmds[0];
++	size_t i;
++
++	fprintf(stderr, "usage:\t%s %s", __progname, c->name);
++	for (i = 1; i < nitems(subcmds); i++) {
++		c = &subcmds[i];
++		printf("|%s", c->name);
++	}
++	printf(" ...\n");
++
++	for (i = 0; i < nitems(subcmds); i++) {
++		c = &subcmds[i];
++		fprintf(stderr, "\t%s %s %s\n", __progname,
++		    c->name, c->usage);
++	}
++
++	exit(1);
++}
++
++__dead static void
++vhd_usage(const struct subcmd *c)
++{
++	extern char *__progname;
++
++	fprintf(stderr, "\t%s vhdX %s %s\n", __progname,
++	    c->name, c->usage);
++
++	exit(1);
++}
++
++int
++main(int argc, char *argv[])
++{
++	const struct subcmd *c;
++
++	if (argc < 2)
++		usage();
++
++	argc -= 1;
++	argv += 1;
++
++	c = vhd_subcmd_lookup(argv[0]);
++	if (c == NULL) {
++		warnx("unknown command %s", argv[0]);
++		usage();
++	}
++
++	return (*c->cmd)(c, argc, argv);
++}
++
++static const struct subcmd *
++vhd_subcmd_lookup(const char *name)
++{
++	size_t i;
++
++	for (i = 0; i < nitems(subcmds); i++) {
++		const struct subcmd *c = &subcmds[i];
++		if (strcmp(c->name, name) == 0)
++			return (c);
++	}
++
++	return (NULL);
++}
++
++static int
++openvhd(int Dflag, const char *name, int flags)
++{
++	char dpath[PATH_MAX];
++	size_t namelen;
++	const char *errstr;
++	int rv;
++	int dfd;
++
++	if (!Dflag) {
++		namelen = strlen(name);
++		if (namelen < VHD_PREFIXLEN)
++			errx(1, "%s: short name", name);
++		if (memcmp(name, VHD_PREFIX, VHD_PREFIXLEN) != 0) {
++			errx(1, "%s: invalid %s device name prefix", name,
++			    VHD_PREFIX);
++		}
++
++		(void)strtonum(name + VHD_PREFIXLEN, 0, 0xffffffff, &errstr);
++		if (errstr != NULL)
++			errx(1, "%s: unit number: %s", name, errstr);
++
++		rv = snprintf(dpath, sizeof(dpath), "/dev/r%sc", name);
++		if (rv == -1 || (size_t)rv >= sizeof(dpath))
++			errx(1, "devpath snprintf");
++
++		name = dpath;
++	}
++
++	dfd = open(name, flags);
++	if (dfd == -1)
++		err(1, "%s", name);
++
++	return dfd;
++}
++
++static int
++vhd_attach(const struct subcmd *c, int argc, char *argv[])
++{
++	struct vhd_attach vh = {
++		.vh_readonly = 0,
++	};
++	int Dflag = 0;
++	int ch;
++	int dfd;
++
++	while ((ch = getopt(argc, argv, "Dr")) != -1) {
++		switch (ch) {
++		case 'D':
++			Dflag = 1;
++			break;
++		case 'r':
++			vh.vh_readonly = 1;
++			break;
++		default:
++			vhd_usage(c);
++			/* NOTREACHED */
++		}
++	}
++
++	argc -= optind;
++	argv += optind;
++
++	if (argc != 2)
++		vhd_usage(c);
++
++	dfd = openvhd(Dflag, argv[0], O_RDWR);
++	vh.vh_file = argv[1];
++
++	if (ioctl(dfd, VHDIOCATTACH, &vh) == -1)
++		err(1, "%s %s %s", c->name, argv[0], argv[1]);
++
++	return (0);
++}
++
++static int
++vhd_detach(const struct subcmd *c, int argc, char *argv[])
++{
++	int force = 0;
++	int Dflag = 0;
++	int ch;
++	int dfd;
++
++	while ((ch = getopt(argc, argv, "Df")) != -1) {
++		switch (ch) {
++		case 'D':
++			Dflag = 1;
++			break;
++		case 'f':
++			force = 1;
++			break;
++		default:
++			vhd_usage(c);
++			/* NOTREACHED */
++		}
++	}
++
++	argc -= optind;
++	argv += optind;
++
++	if (argc != 1)
++		vhd_usage(c);
++
++	dfd = openvhd(Dflag, argv[0], O_RDWR);
++
++	if (ioctl(dfd, VHDIOCDETACH, &force) == -1)
++		err(1, "%s%s %s", force ? "force " : "", c->name, argv[0]);
++
++	return (0);
++}
++
++static int
++vhd_image(const struct subcmd *c, int argc, char *argv[])
++{
++	struct vhd_fname name;
++	int Dflag = 0;
++	int ch;
++	int dfd;
++
++	while ((ch = getopt(argc, argv, "D")) != -1) {
++		switch (ch) {
++		case 'D':
++			Dflag = 1;
++			break;
++		default:
++			vhd_usage(c);
++			/* NOTREACHED */
++		}
++	}
++
++	argc -= optind;
++	argv += optind;
++
++	if (argc != 1)
++		vhd_usage(c);
++
++	dfd = openvhd(Dflag, argv[0], O_RDONLY);
++
++	if (ioctl(dfd, VHDIOCFNAME, &name) == -1)
++		err(1, "%s %s", c->name, argv[0]);
++
++	printf("%s\n", name.vh_name);
++
++	return (0);
++}
++
++#include <sys/stat.h>
++#include <sys/disklabel.h>
++
++static int
++vhd_stat(const struct subcmd *c, int argc, char *argv[])
++{
++	struct stat st;
++	int Dflag = 0;
++	int ch;
++	int dfd;
++	dev_t dev;
++
++	while ((ch = getopt(argc, argv, "D")) != -1) {
++		switch (ch) {
++		case 'D':
++			Dflag = 1;
++			break;
++		default:
++			vhd_usage(c);
++			/* NOTREACHED */
++		}
++	}
++
++	argc -= optind;
++	argv += optind;
++
++	if (argc != 1)
++		vhd_usage(c);
++
++	dfd = openvhd(Dflag, argv[0], O_RDONLY);
++
++	if (ioctl(dfd, VHDIOCSTAT, &st) == -1)
++		err(1, "%s %s", c->name, argv[0]);
++
++	/* could statfs i guess */
++	dev = st.st_dev;
++	printf("device %u, major %d, minor %d, disk unit %d, disk part %d\n",
++	    dev, major(dev), minor(dev), DISKUNIT(dev), DISKPART(dev));
++
++	/* what are the types of these things? */
++	printf("inode %llu\n", (uint64_t)st.st_ino);
++	printf("size %llu\n", (uint64_t)st.st_size);
++
++	return (0);
++}
+-- 
+2.44.1
+
